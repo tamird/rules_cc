@@ -50,11 +50,29 @@ jobs:
           echo "$BAZELISK_SHA256  $RUNNER_TEMP/bazelci/bin/bazel" | shasum -a 256 --check
           chmod +x "$RUNNER_TEMP/bazelci/bin/bazel"
           echo "$RUNNER_TEMP/bazelci/bin" >> "$GITHUB_PATH"
+      - name: Check registry connectivity
+        env:
+          REGISTRY_PROBE_URL: https://bcr.bazel.build/modules/bazel_skylib/1.8.0/MODULE.bazel
+        run: |
+          curl --ipv4 --fail --silent --show-error --head \
+            --connect-timeout 10 --max-time 20 --output /dev/null \
+            --write-out 'IPv4 HTTP %{http_code}\n' "$REGISTRY_PROBE_URL"
+          if curl --ipv6 --fail --silent --show-error --head \
+            --connect-timeout 10 --max-time 20 --output /dev/null \
+            --write-out 'IPv6 HTTP %{http_code}\n' "$REGISTRY_PROBE_URL"; then
+            echo 'IPv6 probe succeeded.'
+          else
+            ipv6_status=$?
+            echo "IPv6 probe exited $ipv6_status; the native task will use IPv4."
+          fi
       - name: Run the native macos_intel_rolling task
         env:
           # Keep the task's build, test, coverage and rolling-version settings;
           # omit Buildkite's remote cache and artifact services on this runner.
           BAZELCI_LOCAL_RUN: '1'
+          # The first hosted run could not route to BCR with Bazel CI's IPv6
+          # preference. Use IPv4 here without changing the canonical task.
+          JAVA_TOOL_OPTIONS: -Djava.net.preferIPv4Stack=true
         run: |
           BUILDKITE_COMMIT="$(git rev-parse HEAD)"
           export BUILDKITE_COMMIT
