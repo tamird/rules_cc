@@ -1,0 +1,68 @@
+name: Native macOS Intel rolling
+
+on:
+  push:
+    branches: [ci/macos-intel-rolling]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: github.repository == 'tamird/rules_cc'
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      # Test the reviewed source, independently of this fork-only workflow commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 1d4be625520f983131e73318255d4c09c571371b
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13.16'
+      - name: Install the runner's Python dependencies
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r /dev/stdin <<'REQUIREMENTS'
+          requests==2.34.2 --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+          charset-normalizer==3.5.2 --hash=sha256:6045373d5a89a5ec71afde535db987ca28e76dfa276c2d4c818265b375d4b055
+          idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+          urllib3==2.8.0 --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+          certifi==2026.7.22 --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+          PyYAML==6.0.3 --hash=sha256:8da9669d359f02c0b91ccc01cac4a67f16afec0dac22c2ad09f46bee0697eba8
+          REQUIREMENTS
+      - name: Fetch the canonical Bazel CI runner and Bazelisk
+        env:
+          # This CI revision predates Buildkite rules-cc build 6229.
+          BAZELCI_REVISION: 1eb3a9ac5c865cdf5c2c08a20777d6b6c9ec5b3f
+          BAZELCI_SHA256: 4df60e84ce0cd7efb0b64ba0b5d957cc8db747c7b54121776bfcf993e8f08063
+          BAZELISK_VERSION: 1.29.0
+          BAZELISK_SHA256: 16c3d7aa15323a9fb69f56c7ec5733ed18bedb786680d0ba13bb12a3c8083007
+        run: |
+          mkdir -p "$RUNNER_TEMP/bazelci/bin"
+          curl --fail --location --retry 3 \
+            "https://raw.githubusercontent.com/bazelbuild/continuous-integration/$BAZELCI_REVISION/buildkite/bazelci.py" \
+            --output "$RUNNER_TEMP/bazelci/bazelci.py"
+          echo "$BAZELCI_SHA256  $RUNNER_TEMP/bazelci/bazelci.py" | shasum -a 256 --check
+          curl --fail --location --retry 3 \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v$BAZELISK_VERSION/bazelisk-darwin-amd64" \
+            --output "$RUNNER_TEMP/bazelci/bin/bazel"
+          echo "$BAZELISK_SHA256  $RUNNER_TEMP/bazelci/bin/bazel" | shasum -a 256 --check
+          chmod +x "$RUNNER_TEMP/bazelci/bin/bazel"
+          echo "$RUNNER_TEMP/bazelci/bin" >> "$GITHUB_PATH"
+      - name: Run the native macos_intel_rolling task
+        env:
+          # Keep the task's build, test, coverage and rolling-version settings;
+          # omit Buildkite's remote cache and artifact services on this runner.
+          BAZELCI_LOCAL_RUN: '1'
+        run: |
+          BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+          export BUILDKITE_COMMIT
+          git show --no-patch --format=fuller HEAD
+          uname -m
+          sw_vers
+          python --version
+          python "$RUNNER_TEMP/bazelci/bazelci.py" runner \
+            --task=macos_intel_rolling \
+            --file_config=.bazelci/presubmit.yml \
+            --repo_location="$GITHUB_WORKSPACE"
