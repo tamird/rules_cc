@@ -46,9 +46,15 @@ jobs:
           echo "$BAZELCI_SHA256  $RUNNER_TEMP/bazelci/bazelci.py" | shasum -a 256 --check
           curl --fail --location --retry 3 \
             "https://github.com/bazelbuild/bazelisk/releases/download/v$BAZELISK_VERSION/bazelisk-darwin-amd64" \
-            --output "$RUNNER_TEMP/bazelci/bin/bazel"
-          echo "$BAZELISK_SHA256  $RUNNER_TEMP/bazelci/bin/bazel" | shasum -a 256 --check
-          chmod +x "$RUNNER_TEMP/bazelci/bin/bazel"
+            --output "$RUNNER_TEMP/bazelci/bin/bazelisk"
+          echo "$BAZELISK_SHA256  $RUNNER_TEMP/bazelci/bin/bazelisk" | shasum -a 256 --check
+          # Bazel ignores JVM option environment variables. Set its supported
+          # startup option so registry access uses IPv4 on this fork runner.
+          cat > "$RUNNER_TEMP/bazelci/bin/bazel" <<'BAZEL'
+          #!/bin/bash
+          exec "$(dirname "$0")/bazelisk" --host_jvm_args=-Djava.net.preferIPv4Stack=true "$@"
+          BAZEL
+          chmod +x "$RUNNER_TEMP/bazelci/bin/bazel" "$RUNNER_TEMP/bazelci/bin/bazelisk"
           echo "$RUNNER_TEMP/bazelci/bin" >> "$GITHUB_PATH"
       - name: Check registry connectivity
         env:
@@ -70,9 +76,6 @@ jobs:
           # Keep the task's build, test, coverage and rolling-version settings;
           # omit Buildkite's remote cache and artifact services on this runner.
           BAZELCI_LOCAL_RUN: '1'
-          # The first hosted run could not route to BCR with Bazel CI's IPv6
-          # preference. Use IPv4 here without changing the canonical task.
-          JAVA_TOOL_OPTIONS: -Djava.net.preferIPv4Stack=true
         run: |
           BUILDKITE_COMMIT="$(git rev-parse HEAD)"
           export BUILDKITE_COMMIT
