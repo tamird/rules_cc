@@ -4,7 +4,10 @@ package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
 
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "stubs.toml",
+])
 
 exports_files(["copy.bara.sky"])
 

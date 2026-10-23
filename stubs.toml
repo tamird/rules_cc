@@ -1,0 +1,4 @@
+format-version = 1
+
+[files]
+"cc/cc_toolchain_config_lib.bzl" = "cc/cc_toolchain_config_lib.bzli"
