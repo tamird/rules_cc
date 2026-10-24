@@ -120,7 +120,7 @@ def _add_transitive_info_providers(ctx, cc_toolchain, cpp_config, feature_config
         cc_toolchain,
         feature_configuration,
         ctx,
-        False,  # generate_hidden_top_level_group
+        generate_hidden_top_level_group = False,
     )
     cc_info = CcInfo(
         compilation_context = compilation_context,
@@ -177,21 +177,6 @@ def _collect_runfiles(ctx, feature_configuration, cc_toolchain, linking_context,
     ])
 
     return (builder.merge(ctx.runfiles(files = builder_artifacts, transitive_files = depset(builder_transitive_artifacts))), runtime_objects_for_coverage)
-
-def _create_dynamic_libraries_copy_actions(ctx, binary, dynamic_libraries_for_runtime):
-    result = []
-    for lib in dynamic_libraries_for_runtime:
-        # If the binary and the DLL are not in the same directory, copy the DLL
-        # to the binary's directory.
-        if lib.dirname != binary.dirname:
-            copy = ctx.actions.declare_file(lib.basename, sibling = binary)
-            ctx.actions.symlink(output = copy, target_file = lib, progress_message = "Copying Execution Dynamic Library")
-            result.append(copy)
-        else:
-            # If the library is already in the same directory as the binary, we don't need to copy it,
-            # but we still add it to the result.
-            result.append(lib)
-    return depset(result)
 
 def _get_dynamic_library_for_runtime_or_none(library_to_link, link_statically):
     if library_to_link.dynamic_library == None:
@@ -718,10 +703,15 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         dwp_exec_group = "cpp_dwp",
     )
     explicit_dwp_file = dwp_file
+    materialize_dwo_files = False
     if not cc_helper.should_create_per_object_debug_info(feature_configuration, cpp_config):
         explicit_dwp_file = None
     elif cc_helper.should_create_test_dwp_for_statically_linked_test(ctx.attr._is_test, linking_mode, cpp_config):
         files_to_build_list.append(dwp_file)
+    elif is_dbg_build:
+        # If fission is enabled, and this is a debug build, and we are not creating a DWP file,
+        # materialize DWO files into their own output_group.
+        materialize_dwo_files = True
 
     # If the binary is linked dynamically and COPY_DYNAMIC_LIBRARIES_TO_BINARY is enabled, collect
     # all the dynamic libraries we need at runtime. Then copy these libraries next to the binary.
@@ -731,7 +721,7 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         libraries = []
         for linker_input in linker_inputs:
             libraries.extend(linker_input.libraries)
-        copied_runtime_dynamic_libraries = _create_dynamic_libraries_copy_actions(ctx, binary, _get_dynamic_libraries_for_runtime(is_static_mode, libraries))
+        copied_runtime_dynamic_libraries = cc_helper.create_dynamic_libraries_copy_actions(ctx, binary, _get_dynamic_libraries_for_runtime(is_static_mode, libraries))
 
     # TODO(b/198254254)(bazel-team): Do we need to put original shared libraries (along with
     # mangled symlinks) into the RunfilesSupport object? It does not seem
@@ -784,6 +774,13 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         output_groups["def_file"] = depset([generated_def_file])
     if linkmap:
         output_groups["linkmap"] = depset([linkmap])
+
+    if materialize_dwo_files and dwo_files:
+        output_groups["dwo_files"] = dwo_files
+    else:
+        # Some configurations always request dwo_files.
+        # If we do not create them, set an empty depset to avoid a warning.
+        output_groups["dwo_files"] = depset()
 
     if cc_linking_outputs_binary_library != None:
         # For consistency and readability.

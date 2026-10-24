@@ -21,6 +21,8 @@ package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])  # Apache 2.0
 
+exports_files(["lib_cc_configure.bzli"])
+
 # It is frequently necessary to constrain platforms based on the cc compiler type.
 constraint_setting(name = "cc_compiler")
 
@@ -56,6 +58,12 @@ constraint_value(
 
 cc_library(
     name = "malloc",
+)
+
+filegroup(
+    name = "grep-includes",
+    srcs = ["empty.cc"],
+    deprecation = "grep-includes is always empty, you must provide your own.",
 )
 
 filegroup(
