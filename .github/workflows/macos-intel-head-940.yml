@@ -1,0 +1,177 @@
+name: Compare rules_cc 940 on Intel Bazel HEAD
+
+on:
+  push:
+    branches: [ci/rules-cc-intel-head-940]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'tamird/rules_cc'
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      PARENT: eaa4b60f46d096726e1ddac63dd62e1bff3ada44
+      CANDIDATE: c8394d850b7f90e9f5bc87a541603a26beb93145
+      BAZEL_REV: a5c50fcb65841b505ec72840d83381a704e70afa
+      BAZEL_SHA256: 8d4fa629fcadf655811b91691879ce3874a2b1ad2dedf43041a01a50933f8e43
+      TARGET: //tests/integration:cc_integration_test
+      ANDROID_HOME: ''
+      ANDROID_NDK_HOME: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: c8394d850b7f90e9f5bc87a541603a26beb93145
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify the Intel toolchain
+        run: |
+          test "$(uname -m)" = x86_64
+          test "$(git rev-parse HEAD~2)" = "$PARENT"
+          sudo xcode-select --switch /Applications/Xcode_16.2.app/Contents/Developer
+          xcodebuild -version
+          test "$(xcodebuild -version | tail -1)" = 'Build version 16C5032a'
+          sw_vers
+          df -h "$RUNNER_TEMP"
+
+          bin="$RUNNER_TEMP/bazel-head/bin"
+          mkdir -p "$bin" "$RUNNER_TEMP/comparison"
+          curl --fail --location --retry 2 --output "$bin/bazel-real" \
+            "https://storage.googleapis.com/bazel-builds/artifacts/macos/$BAZEL_REV/bazel"
+          echo "$BAZEL_SHA256  $bin/bazel-real" | shasum -a 256 --check
+          chmod +x "$bin/bazel-real"
+          ln -s bazel-real "$bin/bazel"
+          test "$("$bin/bazel" --version)" = "bazel 10.0.0-pre-$BAZEL_REV"
+          echo "$bin" >> "$GITHUB_PATH"
+          # The fork's Intel runner has needed IPv4 for registry access.
+          echo 'startup --host_jvm_args=-Djava.net.preferIPv4Stack=true' > "$RUNNER_TEMP/bazel-head/startup.bazelrc"
+          echo "BAZELRC=$RUNNER_TEMP/bazel-head/startup.bazelrc" >> "$GITHUB_ENV"
+          curl --ipv4 --fail --silent --show-error --head --max-time 20 \
+            --output /dev/null https://bcr.bazel.build/modules/bazel_skylib/1.8.0/MODULE.bazel
+      - name: Build and run both revisions in this workspace
+        run: |
+          select_source() {
+            git switch --detach "$1"
+            test "$(git rev-parse HEAD)" = "$1"
+            git diff --exit-code HEAD --
+          }
+          root="$RUNNER_TEMP/comparison"
+          for arm in parent candidate; do
+            case "$arm" in parent) ref=$PARENT ;; candidate) ref=$CANDIDATE ;; esac
+            select_source "$ref"
+            mkdir -p "$root/$arm"
+            if bazel build --jobs=8 "$TARGET" @local_bazel//:bazel; then
+              echo 0 > "$root/$arm/build.status"
+              # The integration launcher copies the imported executable into every shard.
+              imported=$(bazel cquery --output=files @local_bazel//:bazel_link)
+              execution_root=$(bazel info execution_root)
+              echo "$BAZEL_SHA256  $execution_root/$imported" | shasum -a 256 --check
+            else
+              echo "$?" > "$root/$arm/build.status"
+            fi
+          done
+          for arm in parent candidate; do
+            case "$arm" in parent) ref=$PARENT ;; candidate) ref=$CANDIDATE ;; esac
+            select_source "$ref"
+            # Run all ten shards once, regardless of prior cached results.
+            if bazel test --jobs=8 --local_test_jobs=4 --flaky_test_attempts=1 \
+                --nocache_test_results --test_env=HOME --test_env=BAZELRC \
+                --build_event_json_file="$root/$arm/events.jsonl" "$TARGET"; then
+              echo 0 > "$root/$arm/test.status"
+            else
+              echo "$?" > "$root/$arm/test.status"
+            fi
+            # Copy these logs before the second invocation replaces the same output paths.
+            python3 - "$root/$arm" <<'PY'
+          import json
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          folder = Path(sys.argv[1])
+          events = folder / "events.jsonl"
+          rows = []
+          if events.is_file():
+              with events.open() as stream:
+                  for line in stream:
+                      event = json.loads(line)
+                      key = event.get("id", {}).get("testResult", {})
+                      if key.get("label") != os.environ["TARGET"]:
+                          continue
+                      result = event["testResult"]
+                      row = {
+                          "run": key.get("run"), "shard": key.get("shard"), "attempt": key.get("attempt"),
+                          "status": result["status"],
+                          "duration": result.get("testAttemptDuration", result.get("testAttemptDurationMillis")),
+                          "cached": result.get("cachedLocally", False) or result.get("executionInfo", {}).get("cachedRemotely", False),
+                      }
+                      rows.append(row)
+                      for output in result.get("testActionOutput", []):
+                          uri = urlsplit(output.get("uri", ""))
+                          if output.get("name") == "test.log" and uri.scheme == "file":
+                              path = Path(unquote(uri.path))
+                              if path.is_file():
+                                  row["log"] = f"shard-{row['shard']}.log"
+                                  shutil.copyfile(path, folder / row["log"])
+          rows.sort(key=lambda row: row["shard"] or 0)
+          (folder / "shards.json").write_text(json.dumps(rows, indent=2) + "\n")
+          PY
+          done
+      - name: Summarize the two runs
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "comparison"
+          root.mkdir(exist_ok=True)
+          report = {}
+          for arm, rev in (("parent", os.environ["PARENT"]), ("candidate", os.environ["CANDIDATE"])):
+              folder = root / arm
+              def status(phase):
+                  path = folder / f"{phase}.status"
+                  return int(path.read_text()) if path.exists() else None
+              shards = folder / "shards.json"
+              report[arm] = {
+                  "revision": rev, "build_exit": status("build"), "test_exit": status("test"),
+                  "shards": json.loads(shards.read_text()) if shards.exists() else [],
+              }
+          (root / "comparison.json").write_text(json.dumps(report, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              print("| Revision | Shard | Attempt | Status | Duration | Cached |\n|---|---:|---:|---|---:|---|", file=out)
+              for arm, run in report.items():
+                  for row in run["shards"]:
+                      print(f"| {arm} {run['revision'][:8]} | {row['shard']} | {row['attempt']} | {row['status']} | {row['duration']} | {row['cached']} |", file=out)
+          PY
+      - name: Retain the comparison
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: intel-head-comparison
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/comparison/comparison.json
+            ${{ runner.temp }}/comparison/*/shard-*.log
+      - name: Require both complete, uncached results
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          results = json.loads((Path(os.environ["RUNNER_TEMP"]) / "comparison/comparison.json").read_text())
+          assert set(results) == {"parent", "candidate"}
+          for arm, run in results.items():
+              rows = run["shards"]
+              assert run["build_exit"] == 0 and run["test_exit"] == 0, (arm, run)
+              assert len(rows) == 10 and {row["shard"] for row in rows} == set(range(1, 11)), (arm, rows)
+              assert all(row["run"] == row["attempt"] == 1 and row.get("log") for row in rows), (arm, rows)
+              assert all(not row["cached"] and row["status"] == "PASSED" for row in rows), (arm, rows)
+          PY
