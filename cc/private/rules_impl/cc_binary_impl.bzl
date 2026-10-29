@@ -120,7 +120,7 @@ def _add_transitive_info_providers(ctx, cc_toolchain, cpp_config, feature_config
         cc_toolchain,
         feature_configuration,
         ctx,
-        False,  # generate_hidden_top_level_group
+        generate_hidden_top_level_group = False,
     )
     cc_info = CcInfo(
         compilation_context = compilation_context,
@@ -129,83 +129,65 @@ def _add_transitive_info_providers(ctx, cc_toolchain, cpp_config, feature_config
     output_groups["_validation"] = compilation_context.validation_artifacts
     return (cc_info, instrumented_files_provider, output_groups)
 
-def _collect_runfiles(ctx, feature_configuration, cc_toolchain, linking_context, libraries, cc_library_linking_outputs, linking_mode, transitive_artifacts, link_compile_output_separately):
+def _collect_runfiles(ctx, feature_configuration, cc_toolchain, cpp_config, linking_context, libraries, cc_library_linking_outputs, linking_mode, transitive_artifacts, link_compile_output_separately):
     # TODO(b/198254254): Add Legacyexternalrunfiles if necessary.
+    collect_coverage_objects = cpp_config.generate_llvm_lcov()
     runtime_objects_for_coverage = []
     builder_artifacts = []
-    builder_transitive_artifacts = []
+    builder_transitive_artifacts = [transitive_artifacts]
 
-    runtime_libraries = _collect_runtime_libraries(ctx, linking_context, linking_mode != linker_mode.LINKING_DYNAMIC)
-    builder = ctx.runfiles(transitive_files = runtime_libraries, collect_default = True)
+    linking_statically = linking_mode != linker_mode.LINKING_DYNAMIC
+    if not linking_statically or collect_coverage_objects:
+        runtime_libraries = _collect_runtime_libraries(ctx, linking_context, linking_statically)
+        builder_transitive_artifacts.append(runtime_libraries)
+        if collect_coverage_objects:
+            runtime_objects_for_coverage.extend(runtime_libraries.to_list())
+    builder = ctx.runfiles(collect_default = True)
 
-    runtime_objects_for_coverage.extend(runtime_libraries.to_list())
     dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime(True, libraries)
-    runtime_objects_for_coverage.extend(dynamic_libraries_for_runtime)
+    if collect_coverage_objects:
+        runtime_objects_for_coverage.extend(dynamic_libraries_for_runtime)
 
-    builder_transitive_artifacts.extend(transitive_artifacts.to_list())
     builder_artifacts.extend(dynamic_libraries_for_runtime)
 
-    runfiles_is_static = []
-    runfiles_is_not_static = []
+    runfiles_data = []
     for transitive_info_collection in ctx.attr.data:
-        runfiles_is_static.append(ctx.runfiles(transitive_files = _runfiles_function(transitive_info_collection, True)))
-        runfiles_is_not_static.append(ctx.runfiles(transitive_files = _runfiles_function(transitive_info_collection, False)))
-        runtime_objects_for_coverage.extend(_runfiles_function(transitive_info_collection, True).to_list())
-        runtime_objects_for_coverage.extend(_runfiles_function(transitive_info_collection, False).to_list())
+        data_dynamic_libs = _runfiles_function(transitive_info_collection, False)
+        runfiles_data.append(ctx.runfiles(transitive_files = data_dynamic_libs))
+        if collect_coverage_objects:
+            runtime_objects_for_coverage.extend(data_dynamic_libs.to_list())
 
     for dynamic_dep in ctx.attr.dynamic_deps:
         builder = builder.merge(dynamic_dep[DefaultInfo].default_runfiles)
 
-    builder = builder.merge_all(runfiles_is_static + runfiles_is_not_static)
+    builder = builder.merge_all(runfiles_data)
     if linking_mode == linker_mode.LINKING_DYNAMIC:
         dynamic_runtime_lib = cc_toolchain.dynamic_runtime_lib(feature_configuration = feature_configuration)
-        dynamic_runtime_lib_list = dynamic_runtime_lib.to_list()
-        builder_transitive_artifacts.extend(dynamic_runtime_lib_list)
-        runtime_objects_for_coverage.extend(dynamic_runtime_lib_list)
+        builder_transitive_artifacts.append(dynamic_runtime_lib)
+        if collect_coverage_objects:
+            runtime_objects_for_coverage.extend(dynamic_runtime_lib.to_list())
 
     if link_compile_output_separately:
         if cc_library_linking_outputs != None and cc_library_linking_outputs.library_to_link != None and cc_library_linking_outputs.library_to_link.dynamic_library != None:
             builder_artifacts.append(cc_library_linking_outputs.library_to_link.dynamic_library)
-            runtime_objects_for_coverage.append(cc_library_linking_outputs.library_to_link.dynamic_library)
+            if collect_coverage_objects:
+                runtime_objects_for_coverage.append(cc_library_linking_outputs.library_to_link.dynamic_library)
 
     builder = builder.merge_all([
         _default_runfiles_function(ctx, runtime)
         for runtime in cc_helper.get_cc_runtimes(ctx, _is_link_shared(ctx))
-    ] + [
-        ctx.runfiles(transitive_files = _runfiles_function(runtime, linking_mode != linker_mode.LINKING_DYNAMIC))
-        for runtime in cc_helper.get_cc_runtimes(ctx, _is_link_shared(ctx))
     ])
 
-    return (builder.merge(ctx.runfiles(files = builder_artifacts, transitive_files = depset(builder_transitive_artifacts))), runtime_objects_for_coverage)
-
-def _create_dynamic_libraries_copy_actions(ctx, binary, dynamic_libraries_for_runtime):
-    result = []
-    for lib in dynamic_libraries_for_runtime:
-        # If the binary and the DLL are not in the same directory, copy the DLL
-        # to the binary's directory.
-        if lib.dirname != binary.dirname:
-            copy = ctx.actions.declare_file(lib.basename, sibling = binary)
-            ctx.actions.symlink(output = copy, target_file = lib, progress_message = "Copying Execution Dynamic Library")
-            result.append(copy)
-        else:
-            # If the library is already in the same directory as the binary, we don't need to copy it,
-            # but we still add it to the result.
-            result.append(lib)
-    return depset(result)
-
-def _get_dynamic_library_for_runtime_or_none(library_to_link, link_statically):
-    if library_to_link.dynamic_library == None:
-        return None
-    if link_statically and (library_to_link.static_library != None or library_to_link.pic_static_library != None):
-        return None
-    return library_to_link.dynamic_library
+    return (builder.merge(ctx.runfiles(files = builder_artifacts, transitive_files = depset(transitive = builder_transitive_artifacts))), runtime_objects_for_coverage)
 
 def _get_dynamic_libraries_for_runtime(link_statically, libraries):
     dynamic_libraries_for_runtime = []
     for library_to_link in libraries:
-        artifact = _get_dynamic_library_for_runtime_or_none(library_to_link, link_statically)
-        if artifact != None:
-            dynamic_libraries_for_runtime.append(artifact)
+        if library_to_link.dynamic_library == None:
+            continue
+        if link_statically and (library_to_link.static_library != None or library_to_link.pic_static_library != None):
+            continue
+        dynamic_libraries_for_runtime.append(library_to_link.dynamic_library)
     return dynamic_libraries_for_runtime
 
 def _get_providers(ctx):
@@ -718,10 +700,15 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         dwp_exec_group = "cpp_dwp",
     )
     explicit_dwp_file = dwp_file
+    materialize_dwo_files = False
     if not cc_helper.should_create_per_object_debug_info(feature_configuration, cpp_config):
         explicit_dwp_file = None
     elif cc_helper.should_create_test_dwp_for_statically_linked_test(ctx.attr._is_test, linking_mode, cpp_config):
         files_to_build_list.append(dwp_file)
+    elif is_dbg_build:
+        # If fission is enabled, and this is a debug build, and we are not creating a DWP file,
+        # materialize DWO files into their own output_group.
+        materialize_dwo_files = True
 
     # If the binary is linked dynamically and COPY_DYNAMIC_LIBRARIES_TO_BINARY is enabled, collect
     # all the dynamic libraries we need at runtime. Then copy these libraries next to the binary.
@@ -731,7 +718,7 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         libraries = []
         for linker_input in linker_inputs:
             libraries.extend(linker_input.libraries)
-        copied_runtime_dynamic_libraries = _create_dynamic_libraries_copy_actions(ctx, binary, _get_dynamic_libraries_for_runtime(is_static_mode, libraries))
+        copied_runtime_dynamic_libraries = cc_helper.create_dynamic_libraries_copy_actions(ctx, binary, _get_dynamic_libraries_for_runtime(is_static_mode, libraries))
 
     # TODO(b/198254254)(bazel-team): Do we need to put original shared libraries (along with
     # mangled symlinks) into the RunfilesSupport object? It does not seem
@@ -750,6 +737,7 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         ctx,
         feature_configuration,
         cc_toolchain,
+        cpp_config,
         deps_cc_linking_context,
         libraries,
         cc_linking_outputs,
@@ -785,6 +773,13 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
     if linkmap:
         output_groups["linkmap"] = depset([linkmap])
 
+    if materialize_dwo_files and dwo_files:
+        output_groups["dwo_files"] = dwo_files
+    else:
+        # Some configurations always request dwo_files.
+        # If we do not create them, set an empty depset to avoid a warning.
+        output_groups["dwo_files"] = depset()
+
     if cc_linking_outputs_binary_library != None:
         # For consistency and readability.
         library_to_link = cc_linking_outputs_binary_library
@@ -818,12 +813,14 @@ def cc_binary_impl(ctx, additional_linkopts, force_linkstatic = False):
         runfiles = runfiles,
         executable = binary,
     )
+
+    # TODO(https://github.com/bazelbuild/bazel/issues/32085): Use Bazel's type.
     result = [
         cc_info,
         instrumented_files_provider,
         debug_package_info,
         OutputGroupInfo(**output_groups),
-    ]
+    ]  # type: list[ProviderInstance]
     if cc_launcher_info != None:
         result.append(cc_launcher_info)
     return binary_info, result

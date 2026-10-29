@@ -17,6 +17,7 @@ load("//cc:action_names.bzl", "ACTION_NAMES")
 load("//cc:find_cc_toolchain.bzl", "CC_TOOLCHAIN_TYPE")
 load("//cc/common:feature_names.bzl", "feature_names")
 load("//cc/private:paths.bzl", "is_path_absolute")
+load("//cc/private:visibility.bzl", "PUBLIC_IF_NOT_GOOGLE")
 load("//cc/private/rules_impl:objc_common.bzl", "objc_common")
 load(":cc_common.bzl", "cc_common")
 load(
@@ -35,9 +36,8 @@ load(
     _should_stamp = "should_stamp",
 )
 load(":cc_info.bzl", "CcInfo")
-load(":visibility.bzl", "INTERNAL_VISIBILITY")
 
-visibility(INTERNAL_VISIBILITY)
+visibility(PUBLIC_IF_NOT_GOOGLE)
 
 linker_mode = struct(
     LINKING_DYNAMIC = "dynamic_linking_mode",
@@ -58,6 +58,7 @@ _PIC_ARCHIVE_EXTENSIONS = tuple(extensions.PIC_ARCHIVE)
 _ARCHIVE_EXTENSIONS = tuple(extensions.ARCHIVE)
 _ALWAYSLINK_PIC_LIBRARY_EXTENSIONS = tuple(extensions.ALWAYSLINK_PIC_LIBRARY)
 _ALWAYSLINK_LIBRARY_EXTENSIONS = tuple(extensions.ALWAYSLINK_LIBRARY)
+_DISALLOWED_HDRS_EXTENSIONS = {extension: True for extension in extensions.DISALLOWED_HDRS_FILES}
 
 def _rule_error(msg):
     fail(msg)
@@ -240,27 +241,32 @@ def _collect_library_hidden_top_level_artifacts(
 
     return depset(transitive = artifacts_to_force_builder)
 
-def _get_dynamic_libraries_for_runtime(cc_linking_context, linking_statically):
-    libraries = []
-    for linker_input in cc_linking_context.linker_inputs.to_list():
-        libraries.extend(linker_input.libraries)
+def _create_dynamic_libraries_copy_actions(ctx, binary, dynamic_libraries_for_runtime):
+    result = []
+    for lib in depset(dynamic_libraries_for_runtime).to_list():
+        # If the binary and the DLL are not in the same directory, copy the DLL
+        # to the binary's directory.
+        if lib.dirname != binary.dirname:
+            copy = ctx.actions.declare_file(lib.basename, sibling = binary)
+            ctx.actions.symlink(output = copy, target_file = lib, progress_message = "Copying Execution Dynamic Library")
+            result.append(copy)
+        else:
+            # If the library is already in the same directory as the binary, we don't need to copy it,
+            # but we still add it to the result.
+            result.append(lib)
+    return depset(result)
 
+def _get_dynamic_libraries_for_runtime(cc_linking_context, linking_statically):
     dynamic_libraries_for_runtime = []
-    for library in libraries:
-        artifact = _get_dynamic_library_for_runtime_or_none(library, linking_statically)
-        if artifact != None:
-            dynamic_libraries_for_runtime.append(artifact)
+    for linker_input in cc_linking_context.linker_inputs.to_list():
+        for library in linker_input.libraries:
+            if library.dynamic_library == None:
+                continue
+            if linking_statically and (library.static_library != None or library.pic_static_library != None):
+                continue
+            dynamic_libraries_for_runtime.append(library.dynamic_library)
 
     return dynamic_libraries_for_runtime
-
-def _get_dynamic_library_for_runtime_or_none(library, linking_statically):
-    if library.dynamic_library == None:
-        return None
-
-    if linking_statically and (library.static_library != None or library.pic_static_library != None):
-        return None
-
-    return library.dynamic_library
 
 def _collect_native_cc_libraries(deps, libraries):
     _CcNativeLibraryInfo = cc_common.get_cc_native_library_info_provider()
@@ -363,9 +369,13 @@ def _build_precompiled_files(ctx):
     )
 
 def _check_file_extension(file, allowed_extensions, allow_versioned_shared_libraries):
-    extension = "." + file.extension
-    return extension in allowed_extensions or \
-           (allow_versioned_shared_libraries and is_versioned_shared_library_extension_valid(file.path))
+    extension = file.extension
+
+    # The final extension of a versioned .so or .dylib starts with a digit.
+    return "." + extension in allowed_extensions or \
+           (allow_versioned_shared_libraries and len(extension) > 0 and
+            extension[0].isdigit() and
+            is_versioned_shared_library_extension_valid(file.path))
 
 def _check_file_extensions(attr_values, allowed_extensions, attr_name, label, rule_name, allow_versioned_shared_libraries):
     for attr_value in attr_values:
@@ -908,11 +918,21 @@ def _expand_make_variables_for_copts(ctx, tokenization, unexpanded_tokens, addit
                 tokens.append(_expand(ctx, token, additional_make_variable_substitutions, targets = targets))
     return tokens
 
+def _matches_disallowed_copt(flag, disallowed_flags):
+    """Returns True if flag equals a disallowed flag or has a disallowed prefix."""
+    for disallowed in disallowed_flags:
+        if flag == disallowed or (
+            disallowed.endswith("=") and flag.startswith(disallowed)
+        ):
+            return True
+    return False
+
 def _verify_no_disallowed_copts(
         ctx,
         copts,
         attr_name,
-        disallowed_copts_infos = []):
+        disallowed_copts_infos = [],
+        command_line_copts = None):
     """Fails the build if copts contain any disallowed compiler flags."""
     if not disallowed_copts_infos:
         return
@@ -922,49 +942,72 @@ def _verify_no_disallowed_copts(
         if not hasattr(info, "flags") or not info.flags:
             continue
 
-        # Check if target is exempt under this policy's allowlist
-        allowlist = getattr(info, "allowlist", None)
-        if allowlist != None and allowlist.contains(ctx.label):
+        # Pair each set of flags with a description of where it came from.
+        flag_sources = [("attribute '{}'".format(attr_name), copts)]
+        if getattr(info, "verify_command_line", False) and command_line_copts:
+            flag_sources.extend([
+                ("'--copt' flag", command_line_copts.copts),
+                ("'--cxxopt' flag", command_line_copts.cxxopts),
+                ("'--conlyopt' flag", command_line_copts.conlyopts),
+            ])
+
+        matches = [
+            (flag, source)
+            for source, flags in flag_sources
+            for flag in flags
+            if _matches_disallowed_copt(flag, info.flags)
+        ]
+        if not matches:
             continue
 
-        allowlist_target_label = getattr(info, "allowlist_target_label", None)
-        error_message = getattr(info, "error_message", None)
+        # Check the allowlists only after a match: package allowlist lookups
+        # scan "//pkg/..." entries linearly, and most targets use no disallowed
+        # flags.
+        package_allowlist = getattr(info, "package_allowlist", getattr(info, "allowlist", None))
+        if package_allowlist != None and package_allowlist.contains(ctx.label):
+            continue
 
-        # Check each expanded flag against disallowed rules
-        for flag in copts:
-            for disallowed in info.flags:
-                if flag == disallowed or (
-                    disallowed.endswith("=") and flag.startswith(disallowed)
-                ):
-                    violations.append((flag, allowlist_target_label, error_message))
+        target_allowlist = getattr(info, "target_allowlist", None)
+
+        if target_allowlist != None and (
+            str(ctx.label) in target_allowlist or
+            str(ctx.label).lstrip("@") in target_allowlist
+        ):
+            continue
+
+        policy_label = getattr(info, "policy_label", getattr(info, "allowlist_target_label", None))
+        error_message = getattr(info, "error_message", None)
+        for flag, source in matches:
+            violations.append((flag, policy_label, error_message, source))
 
     if violations:
         formatted_violations = []
-        for flag, allowlist_target_label, error_message in violations:
-            allowlist_clause = (
-                " (target is not in the allowlist '{}')".format(
-                    allowlist_target_label,
-                ) if allowlist_target_label else ""
+        for flag, policy_label, error_message, source in violations:
+            policy_clause = (
+                " disallowed by '{}'".format(
+                    policy_label,
+                ) if policy_label else ""
             )
             error_clause = (
                 ": {}".format(error_message) if error_message else ""
             )
             formatted_violations.append(
-                "- Flag '{}'{}{}".format(
+                "- Flag '{}' in {}{}{}".format(
                     flag,
-                    allowlist_clause,
+                    source,
+                    policy_clause,
                     error_clause,
                 ),
             )
         fail(
             """
-[DISALLOWED COPTS ERROR] Target '{}' specifies disallowed compiler flag(s) in attribute '{}':
+[DISALLOWED COPTS ERROR] Target '{}' specifies disallowed compiler flag(s):
   {}
 """.format(
                 ctx.label,
-                attr_name,
                 "\n  ".join(formatted_violations),
             ),
+            stack_trace = False,
         )
 
 def _get_copts(
@@ -980,8 +1023,19 @@ def _get_copts(
         requested_features = ctx.features
     attribute_copts = getattr(ctx.attr, attr)
 
-    # If we wanted to include command-line specified flags, we could add
-    # ctx.fragments.cpp.copts (and cxxopts/conlyopts) here.
+    # Only read the command-line options when a policy asks for them; this runs
+    # for every C++ target, once per copts-like attribute.
+    command_line_copts = None
+    for info in disallowed_copts_infos:
+        if getattr(info, "verify_command_line", False):
+            cpp_fragment = ctx.fragments.cpp
+            command_line_copts = struct(
+                copts = cpp_fragment.copts,
+                cxxopts = cpp_fragment.cxxopts,
+                conlyopts = cpp_fragment.conlyopts,
+            )
+            break
+
     tokenization = not (feature_configuration.is_enabled(feature_names.NO_COPTS_TOKENIZATION) or feature_names.NO_COPTS_TOKENIZATION in requested_features)
     expanded_attribute_copts = _expand_make_variables_for_copts(ctx, tokenization, attribute_copts, additional_make_variable_substitutions)
 
@@ -990,6 +1044,7 @@ def _get_copts(
         expanded_attribute_copts,
         attr,
         disallowed_copts_infos = disallowed_copts_infos,
+        command_line_copts = command_line_copts,
     )
 
     return expanded_attribute_copts
@@ -1033,12 +1088,6 @@ def _defines(ctx, additional_make_variable_substitutions):
 def _local_defines(ctx, additional_make_variable_substitutions):
     return _defines_attribute(ctx, additional_make_variable_substitutions, "local_defines", getattr(ctx.attr, "additional_compiler_inputs", []))
 
-def _map_to_list(m):
-    result = []
-    for k, v in m.items():
-        result.append((k, v))
-    return result
-
 def _calculate_artifact_label_map(attr_list, attr_name):
     """
     Converts a label_list attribute into a list of (Artifact, Label) tuples.
@@ -1066,13 +1115,13 @@ def _get_srcs(ctx):
     if not hasattr(ctx.attr, "srcs"):
         return []
     artifact_label_map = _calculate_artifact_label_map(ctx.attr.srcs, "srcs")
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 def _get_cpp_module_interfaces(ctx):
     if not hasattr(ctx.attr, "module_interfaces"):
         return []
     artifact_label_map = _calculate_artifact_label_map(ctx.attr.module_interfaces, "module_interfaces")
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 # Returns a list of (Artifact, Label) tuples. Each tuple represents an input source
 # file and the label of the rule that generates it (or the label of the source file itself if it
@@ -1086,7 +1135,7 @@ def _get_private_hdrs(ctx):
             for artifact in src[DefaultInfo].files.to_list():
                 if "." + artifact.extension in extensions.CC_HEADER:
                     artifact_label_map[artifact] = src.label
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 # Returns the files from headers and does some checks.
 def _get_public_hdrs(ctx):
@@ -1096,10 +1145,10 @@ def _get_public_hdrs(ctx):
     for hdr in ctx.attr.hdrs:
         if DefaultInfo in hdr:
             for artifact in hdr[DefaultInfo].files.to_list():
-                if _check_file_extension(artifact, extensions.DISALLOWED_HDRS_FILES, True):
+                if _check_file_extension(artifact, _DISALLOWED_HDRS_EXTENSIONS, True):
                     continue
                 artifact_label_map[artifact] = hdr.label
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 def _linkopts(ctx, additional_make_variable_substitutions, cc_toolchain):
     linkopts = getattr(ctx.attr, "linkopts", [])
@@ -1226,6 +1275,7 @@ cc_helper = struct(
     get_coverage_environment = _get_coverage_environment,
     create_cc_instrumented_files_info = _create_cc_instrumented_files_info,
     get_dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime,
+    create_dynamic_libraries_copy_actions = _create_dynamic_libraries_copy_actions,
     build_output_groups_for_emitting_compile_providers = _build_output_groups_for_emitting_compile_providers,
     merge_cc_debug_contexts = _merge_cc_debug_contexts,
     get_providers = _get_providers,
