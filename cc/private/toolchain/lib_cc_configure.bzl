@@ -17,16 +17,8 @@
 def resolve_labels(repository_ctx, labels):
     """Resolves a collection of labels to their paths.
 
-    Label resolution can cause the evaluation of Starlark functions to restart.
-    For functions with side-effects (like the auto-configuration functions, which
-    inspect the system and touch the file system), such restarts are costly.
-    We cannot avoid the restarts, but we can minimize their penalty by resolving
-    all labels upfront.
-
-    Among other things, doing less work on restarts can cut analysis times by
-    several seconds and may also prevent tickling kernel conditions that cause
-    build failures.  See https://github.com/bazelbuild/bazel/issues/5196 for
-    more details.
+    Deprecated: This function is no longer used by rules_cc and will be removed
+    in the future. Pass labels to repository_ctx methods directly instead.
 
     Args:
       repository_ctx: The context with which to resolve the labels.
@@ -37,14 +29,35 @@ def resolve_labels(repository_ctx, labels):
     """
     return dict([(label, repository_ctx.path(Label(label))) for label in labels])
 
+def copy_file(repository_ctx, src, dest):
+    # type: (repository_ctx, Label, str) -> None
+    """Copies a file into the repository.
+
+    Unlike repository_ctx.symlink, this doesn't require the repository
+    containing the file to be present on disk.
+
+    Args:
+      repository_ctx: The repository context.
+      src: The Label of the file to copy.
+      dest: The path of the copy relative to the repository root.
+    """
+    repository_ctx.template(dest, src, executable = False)
+
+def escape_percent(value):
+    # type: (str) -> str
+    """Escape percent signs in a known string for the Crosstool."""
+    return value.replace("%", "%%")
+
 def escape_string(arg):
+    # type: (object) -> str | None
     """Escape percent sign (%) in the string so it can appear in the Crosstool."""
     if arg != None:
-        return str(arg).replace("%", "%%")
+        return escape_percent(str(arg))
     else:
         return None
 
 def split_escaped(string, delimiter):
+    # type: (str, str) -> list[str]
     """Split string on the delimiter unless %-escaped.
 
     Examples:
@@ -75,7 +88,7 @@ def split_escaped(string, delimiter):
 
     i = 0
     result = []
-    accumulator = []
+    accumulator = []  # type: list[str]
     length = len(string)
     delimiter_length = len(delimiter)
 
@@ -106,12 +119,14 @@ def split_escaped(string, delimiter):
     return result
 
 def auto_configure_fail(msg):
+    # type: (object) -> Never
     """Output failure message when auto configuration fails."""
     red = "\033[0;31m"
     no_color = "\033[0m"
     fail("\n%sAuto-Configuration Error:%s %s\n" % (red, no_color, msg))
 
 def auto_configure_warning(msg):
+    # type: (object) -> None
     """Output warning message during auto configuration."""
     yellow = "\033[1;33m"
     no_color = "\033[0m"
@@ -137,8 +152,7 @@ def get_env_var(repository_ctx, name, default = None, enable_warning = True):
         if enable_warning:
             auto_configure_warning("'%s' environment variable is not set, using '%s' as default" % (name, default))
         return default
-    auto_configure_fail("'%s' environment variable is not set" % name)
-    return None
+    return auto_configure_fail("'%s' environment variable is not set" % name)
 
 def which(repository_ctx, cmd, default = None):
     """A wrapper around repository_ctx.which() to provide a fallback value. Doesn't %-escape the value!
@@ -170,8 +184,7 @@ def which_cmd(repository_ctx, cmd, default = None):
     if default != None:
         auto_configure_warning("Cannot find %s in PATH, using '%s' as default.\nPATH=%s" % (cmd, default, path))
         return default
-    auto_configure_fail("Cannot find %s in PATH, please make sure %s is installed and add its directory in PATH.\nPATH=%s" % (cmd, cmd, path))
-    return str(result)
+    return auto_configure_fail("Cannot find %s in PATH, please make sure %s is installed and add its directory in PATH.\nPATH=%s" % (cmd, cmd, path))
 
 def execute(
         repository_ctx,
@@ -223,6 +236,9 @@ def execute(
     return stripped_stdout
 
 def get_cpu_value(repository_ctx):
+    # type: (repository_ctx) -> str
+    # TODO(https://github.com/bazelbuild/bazel/issues/32020): make this an
+    # annotation when supported Bazel versions expose a repository context type.
     """Compute the cpu_value based on the OS name. Doesn't %-escape the result!
 
     Args:
@@ -262,26 +278,31 @@ def get_cpu_value(repository_ctx):
     return "k8" if arch in ["amd64", "x86_64", "x64"] else "piii"
 
 def is_cc_configure_debug(repository_ctx):
+    # type: (repository_ctx) -> bool
     """Returns True if CC_CONFIGURE_DEBUG is set to 1."""
     env = repository_ctx.os.environ
     return "CC_CONFIGURE_DEBUG" in env and env["CC_CONFIGURE_DEBUG"] == "1"
 
 def build_flags(flags):
+    # type: (Collection[str]) -> str
     """Convert `flags` to a string of flag fields."""
     return "\n".join(["        flag: '" + flag + "'" for flag in flags])
 
 def get_starlark_list(values):
+    # type: (Collection[str]) -> str
     """Convert a list of string into a string that can be passed to a rule attribute."""
     if not values:
         return ""
     return "\"" + "\",\n    \"".join(values) + "\""
 
 def auto_configure_warning_maybe(repository_ctx, msg):
+    # type: (repository_ctx, object) -> None
     """Output warning message when CC_CONFIGURE_DEBUG is enabled."""
     if is_cc_configure_debug(repository_ctx):
         auto_configure_warning(msg)
 
 def write_builtin_include_directory_paths(repository_ctx, cc, directories, file_suffix = ""):
+    # type: (repository_ctx, object, Collection[str], str) -> None
     """Generate output file named 'builtin_include_directory_paths' in the root of the repository."""
     if get_env_var(repository_ctx, "BAZEL_IGNORE_SYSTEM_HEADERS_VERSIONS", "0", False) == "1":
         repository_ctx.file(

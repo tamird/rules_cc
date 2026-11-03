@@ -18,6 +18,7 @@ load(
     _CREATE_COMPILE_ACTION_API_ALLOWLISTED_PACKAGES = "CREATE_COMPILE_ACTION_API_ALLOWLISTED_PACKAGES",
     _PRIVATE_STARLARKIFICATION_ALLOWLIST = "PRIVATE_STARLARKIFICATION_ALLOWLIST",
 )
+load("//cc/common:semantics.bzl", _starlark_cc_semantics = "semantics")
 load("//cc/private:cc_info.bzl", "CcNativeLibraryInfo", "create_compilation_context", "create_debug_context", "create_linking_context", "create_module_map", "merge_cc_infos", "merge_compilation_contexts", "merge_debug_context", "merge_linking_contexts")
 load("//cc/private:cc_internal.bzl", _cc_internal = "cc_internal")
 load("//cc/private:cc_launcher_info.bzl", "CcLauncherInfo")
@@ -170,7 +171,7 @@ def _get_environment_variables(*, feature_configuration, action_name, variables)
     return _cc_common_internal.get_environment_variables(feature_configuration = feature_configuration, action_name = action_name, variables = variables)
 
 def _empty_variables():
-    return _cc_common_internal.empty_variables()
+    return _cc_internal.cc_toolchain_variables(vars = {})
 
 def _create_library_to_link(
         *,
@@ -251,7 +252,9 @@ def _create_compilation_context(
         system_includes = None,
         includes = None,
         quote_includes = None,
-        framework_includes = None,
+        # TODO(https://github.com/bazelbuild/bazel/issues/32021): make this an
+        # annotation when supported Bazel versions expose element-typed depsets.
+        framework_includes = None,  # type: depset[str] | None
         defines = None,
         local_defines = None,
         direct_textual_headers = [],
@@ -637,19 +640,25 @@ def _create_compile_action(
         action_name,
         compilation_context,
         additional_inputs = None,
-        additional_outputs = []):
+        additional_outputs = [],
+        use_pic = False):
     _cc_internal.check_private_api(allowlist = _CREATE_COMPILE_ACTION_API_ALLOWLISTED_PACKAGES)
-    return _cc_common_internal.create_compile_action(
-        actions = actions,
+    ctx = _cc_internal.actions2ctx_cheat(actions)
+    return _cc_internal.create_cc_compile_action(
+        action_construction_context = ctx,
+        cc_compilation_context = compilation_context,
         cc_toolchain = cc_toolchain,
+        configuration = ctx.configuration,
         feature_configuration = feature_configuration,
-        source_file = source_file,
+        source = source_file,
+        additional_compilation_inputs_set = additional_inputs,
         output_file = output_file,
-        variables = variables,
+        use_pic = use_pic,
+        compile_build_variables = variables,
         action_name = action_name,
-        compilation_context = compilation_context,
-        additional_inputs = additional_inputs,
         additional_outputs = additional_outputs,
+        needs_include_validation = True,
+        toolchain_type = _starlark_cc_semantics.toolchain,
     )
 
 def _implementation_deps_allowed_by_allowlist(*, ctx):

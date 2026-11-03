@@ -19,10 +19,10 @@ load(
     "auto_configure_fail",
     "auto_configure_warning",
     "auto_configure_warning_maybe",
-    "escape_string",
+    "copy_file",
+    "escape_percent",
     "execute",
     "get_starlark_list",
-    "resolve_labels",
     "split_escaped",
     "write_builtin_include_directory_paths",
 )
@@ -30,25 +30,27 @@ load(
 _targets_archs = {"arm": "amd64_arm", "arm64": "amd64_arm64", "x64": "amd64", "x86": "amd64_x86"}
 _targets_lib_folder = {"arm": "arm", "arm64": "arm64", "x86": ""}
 
-def _lookup_env_var(env, name, default = None):
-    """Lookup environment variable case-insensitve.
+def _lookup_env_var(env, name):
+    # type: (Mapping[str, str], str) -> tuple[str, str | None]
+    """Look up an environment variable case-insensitively.
 
     If a matching (case-insensitive) entry is found in the env dict both
     the key and the value are returned. The returned key might differ from
     name in casing.
 
-    If a matching key was found its value is returned otherwise
-    the default is returned.
-
-    Return a (key, value) tuple"""
+    If no entry matches, return (name, None).
+    """
     for key, value in env.items():
         if name.lower() == key.lower():
             return (key, value)
-    return (name, default)
+    return (name, None)
 
-def _get_env_var(repository_ctx, name, default = None):
+def _get_env_var(repository_ctx, name):
+    # type: (repository_ctx, str) -> str | None
+    # TODO(https://github.com/bazelbuild/bazel/issues/32020): make this an
+    # annotation when supported Bazel versions expose a repository context type.
     """Returns a value from an environment variable."""
-    return _lookup_env_var(repository_ctx.os.environ, name, default)[1]
+    return _lookup_env_var(repository_ctx.os.environ, name)[1]
 
 def _get_path_env_var(repository_ctx, name):
     """Returns a path from an environment variable.
@@ -91,7 +93,7 @@ def _get_escaped_windows_msys_starlark_content(repository_ctx, use_mingw = False
             msys_root = tokens[0][:len(tokens[0]) - len("bin")]
 
     prefix = "mingw64" if use_mingw else "usr"
-    tool_path_prefix = escape_string(msys_root) + prefix
+    tool_path_prefix = escape_percent(msys_root) + prefix
     tool_bin_path = tool_path_prefix + "/bin"
     tool_path = {}
 
@@ -113,12 +115,12 @@ def _get_system_root(repository_ctx):
             repository_ctx,
             "SYSTEMROOT is not set, using default SYSTEMROOT=C:\\Windows",
         )
-    return escape_string(systemroot)
+    return escape_percent(systemroot)
 
 def _add_system_root(repository_ctx, env):
     """Running VCVARSALL.BAT and VCVARSQUERYREGISTRY.BAT need %SYSTEMROOT%\\\\system32 in PATH."""
-    env_key, env_value = _lookup_env_var(env, "PATH", default = "")
-    env[env_key] = env_value + ";" + _get_system_root(repository_ctx) + "\\system32"
+    env_key, env_value = _lookup_env_var(env, "PATH")
+    env[env_key] = (env_value or "") + ";" + _get_system_root(repository_ctx) + "\\system32"
     return env
 
 def find_vc_path(repository_ctx):
@@ -343,7 +345,7 @@ def _get_vc_env_vars(repository_ctx, vc_path, msvc_vars_x64, target_arch):
 
     env["INCLUDE"] = msvc_vars_x64["%{msvc_env_include_x64}"]
     env["LIB"] = lib.replace("x64", target_arch)
-    env["PATH"] = escape_string(tools_path.replace("\\", "\\\\")) + ";" + msvc_vars_x64["%{msvc_env_path_x64}"]
+    env["PATH"] = escape_percent(tools_path.replace("\\", "\\\\")) + ";" + msvc_vars_x64["%{msvc_env_path_x64}"]
     return env
 
 def setup_vc_env_vars(repository_ctx, vc_path, envvars = [], allow_empty = False, escape = True):
@@ -398,7 +400,7 @@ def setup_vc_env_vars(repository_ctx, vc_path, envvars = [], allow_empty = False
     env_map = {}
     for env in envs:
         key, value = env.split("=", 1)
-        env_map[key] = escape_string(value.replace("\\", "\\\\")) if escape else value
+        env_map[key] = escape_percent(value.replace("\\", "\\\\")) if escape else value
 
     if not allow_empty:
         _check_env_vars(env_map, cmd, expected = envvars)
@@ -445,7 +447,7 @@ def _get_vc_full_version(repository_ctx, vc_path):
 
 def _get_winsdk_full_version(repository_ctx):
     """Return the value of BAZEL_WINSDK_FULL_VERSION if defined, otherwise an empty string."""
-    return _get_env_var(repository_ctx, "BAZEL_WINSDK_FULL_VERSION", default = "")
+    return _get_env_var(repository_ctx, "BAZEL_WINSDK_FULL_VERSION") or ""
 
 def _find_msvc_tools(repository_ctx, vc_path, target_arch = "x64"):
     """Find the exact paths of the build tools in MSVC for the given target. Doesn't %-escape the result."""
@@ -614,7 +616,7 @@ def find_llvm_tool(repository_ctx, llvm_path, tool):
 
 def _use_clang_cl(repository_ctx):
     """Returns True if USE_CLANG_CL is set to 1."""
-    return _get_env_var(repository_ctx, "USE_CLANG_CL", default = "0") == "1"
+    return _get_env_var(repository_ctx, "USE_CLANG_CL") == "1"
 
 def _find_missing_llvm_tools(repository_ctx, llvm_path):
     """Check if any required tool is missing under given LLVM path."""
@@ -665,7 +667,7 @@ def _get_msys_mingw_vars(repository_ctx):
     }
     return msys_mingw_vars
 
-def _get_msvc_vars(repository_ctx, paths, target_arch = "x64", msvc_vars_x64 = None):
+def _get_msvc_vars(repository_ctx, target_arch = "x64", msvc_vars_x64 = None):
     """Get the variables we need to populate the MSVC toolchains."""
     vc_path = find_vc_path(repository_ctx)
     missing_tools = None
@@ -673,7 +675,7 @@ def _get_msvc_vars(repository_ctx, paths, target_arch = "x64", msvc_vars_x64 = N
     if not vc_path:
         repository_ctx.template(
             "vc_installation_error_" + target_arch + ".bat",
-            paths["@rules_cc//cc/private/toolchain:vc_installation_error.bat.tpl"],
+            Label("@rules_cc//cc/private/toolchain:vc_installation_error.bat.tpl"),
             {"%{vc_error_message}": ""},
         )
     else:
@@ -689,7 +691,7 @@ def _get_msvc_vars(repository_ctx, paths, target_arch = "x64", msvc_vars_x64 = N
             ])
             repository_ctx.template(
                 "vc_installation_error_" + target_arch + ".bat",
-                paths["@rules_cc//cc/private/toolchain:vc_installation_error.bat.tpl"],
+                Label("@rules_cc//cc/private/toolchain:vc_installation_error.bat.tpl"),
                 {"%{vc_error_message}": message},
             )
 
@@ -715,8 +717,8 @@ def _get_msvc_vars(repository_ctx, paths, target_arch = "x64", msvc_vars_x64 = N
         env = _get_vc_env_vars(repository_ctx, vc_path, msvc_vars_x64, target_arch)
     else:
         env = setup_vc_env_vars(repository_ctx, vc_path)
-    escaped_tmp_dir = escape_string(_get_temp_env(repository_ctx).replace("\\", "\\\\"))
-    escaped_include_paths = escape_string(env["INCLUDE"])
+    escaped_tmp_dir = escape_percent(_get_temp_env(repository_ctx).replace("\\", "\\\\"))
+    escaped_include_paths = escape_percent(env["INCLUDE"])
 
     build_tools = {}
     llvm_path = ""
@@ -752,7 +754,7 @@ def _get_msvc_vars(repository_ctx, paths, target_arch = "x64", msvc_vars_x64 = N
         clang_include_path = (clang_dir + "\\include").replace("\\", "\\\\")
         escaped_cxx_include_directories.append("\"%s\"" % clang_include_path)
         clang_lib_path = (clang_dir + "\\lib\\windows").replace("\\", "\\\\")
-        env["LIB"] = escape_string(env["LIB"]) + ";" + clang_lib_path
+        env["LIB"] = escape_percent(env["LIB"]) + ";" + clang_lib_path
 
     support_debug_fastlink = _is_support_debug_fastlink(repository_ctx, build_tools["LINK"])
     write_builtin_include_directory_paths(repository_ctx, "msvc", escaped_cxx_include_directories, file_suffix = "_msvc")
@@ -775,8 +777,8 @@ Fix this by installing the English language pack for the Visual Studio installat
         "%{msvc_env_tmp_" + target_arch + "}": escaped_tmp_dir,
         "%{msvc_env_include_" + target_arch + "}": escaped_include_paths,
         "%{msvc_cxx_builtin_include_directories_" + target_arch + "}": "        " + ",\n        ".join(escaped_cxx_include_directories),
-        "%{msvc_env_path_" + target_arch + "}": escape_string(env["PATH"]),
-        "%{msvc_env_lib_" + target_arch + "}": escape_string(env["LIB"]),
+        "%{msvc_env_path_" + target_arch + "}": escape_percent(env["PATH"]),
+        "%{msvc_env_lib_" + target_arch + "}": escape_percent(env["LIB"]),
         "%{msvc_cl_path_" + target_arch + "}": build_tools["CL"],
         "%{msvc_ml_path_" + target_arch + "}": build_tools.get("ML", "msvc_arm_toolchain_does_not_support_ml"),
         "%{msvc_link_path_" + target_arch + "}": build_tools["LINK"],
@@ -788,7 +790,7 @@ Fix this by installing the English language pack for the Visual Studio installat
     }
     return msvc_vars
 
-def _get_clang_cl_vars(repository_ctx, paths, msvc_vars, target_arch):
+def _get_clang_cl_vars(repository_ctx, msvc_vars, target_arch):
     """Get the variables we need to populate the clang-cl toolchains."""
     llvm_path = find_llvm_path(repository_ctx)
     error_script = None
@@ -797,7 +799,7 @@ def _get_clang_cl_vars(repository_ctx, paths, msvc_vars, target_arch):
     elif not llvm_path:
         repository_ctx.template(
             "clang_installation_error.bat",
-            paths["@rules_cc//cc/private/toolchain:clang_installation_error.bat.tpl"],
+            Label("@rules_cc//cc/private/toolchain:clang_installation_error.bat.tpl"),
             {"%{clang_error_message}": ""},
         )
         error_script = "clang_installation_error.bat"
@@ -813,7 +815,7 @@ def _get_clang_cl_vars(repository_ctx, paths, msvc_vars, target_arch):
             ])
             repository_ctx.template(
                 "clang_installation_error.bat",
-                paths["@rules_cc//cc/private/toolchain:clang_installation_error.bat.tpl"],
+                Label("@rules_cc//cc/private/toolchain:clang_installation_error.bat.tpl"),
                 {"%{clang_error_message}": message},
             )
             error_script = "clang_installation_error.bat"
@@ -865,10 +867,10 @@ def _get_clang_cl_vars(repository_ctx, paths, msvc_vars, target_arch):
     }
     return clang_cl_vars
 
-def _get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, target_arch = "x64"):
+def _get_msvc_deps_scanner_vars(repository_ctx, template_vars, target_arch = "x64"):
     repository_ctx.template(
         "msvc_deps_scanner_wrapper_" + target_arch + ".bat",
-        paths["@rules_cc//cc/private/toolchain:msvc_deps_scanner_wrapper.bat.tpl"],
+        Label("@rules_cc//cc/private/toolchain:msvc_deps_scanner_wrapper.bat.tpl"),
         {
             "%{cc}": template_vars["%{msvc_cl_path_" + target_arch + "}"],
         },
@@ -878,33 +880,17 @@ def _get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, target_arc
         "%{msvc_deps_scanner_wrapper_path_" + target_arch + "}": "msvc_deps_scanner_wrapper_" + target_arch + ".bat",
     }
 
+def _get_env_options(repository_ctx, name):
+    # type: (repository_ctx, str) -> list[str]
+    return split_escaped(_get_env_var(repository_ctx, name) or "", ":")
+
 def _get_copts(repository_ctx):
     """Get the variables we need to populate the msys/mingw toolchains."""
-    conly_opts = split_escaped(_get_env_var(
-        repository_ctx,
-        "BAZEL_CONLYOPTS",
-        "",
-    ), ":")
-    all_compile_opts = split_escaped(_get_env_var(
-        repository_ctx,
-        "BAZEL_COPTS",
-        "",
-    ), ":")
-    cxx_opts = split_escaped(_get_env_var(
-        repository_ctx,
-        "BAZEL_CXXOPTS",
-        "",
-    ), ":")
-    link_opts = split_escaped(_get_env_var(
-        repository_ctx,
-        "BAZEL_LINKOPTS",
-        "",
-    ), ":")
-    win32_winnt_opts = _get_env_var(
-        repository_ctx,
-        "BAZEL_WIN32_WINNT",
-        None,
-    )
+    conly_opts = _get_env_options(repository_ctx, "BAZEL_CONLYOPTS")
+    all_compile_opts = _get_env_options(repository_ctx, "BAZEL_COPTS")
+    cxx_opts = _get_env_options(repository_ctx, "BAZEL_CXXOPTS")
+    link_opts = _get_env_options(repository_ctx, "BAZEL_LINKOPTS")
+    win32_winnt_opts = _get_env_var(repository_ctx, "BAZEL_WIN32_WINNT")
     copts_vars = {
         "%{all_compile_flags}": get_starlark_list(all_compile_opts),
         "%{conly_flags}": get_starlark_list(conly_opts),
@@ -912,37 +898,31 @@ def _get_copts(repository_ctx):
         "%{link_flags}": get_starlark_list(link_opts),
         # None means the user didn't provide the override.
         # Fall back to the default in that case.
-        "%{win32_winnt_flag}": '    win32_winnt_flag = "' + escape_string(win32_winnt_opts) + '", ' if win32_winnt_opts != None else "",
+        "%{win32_winnt_flag}": '    win32_winnt_flag = "' + escape_percent(win32_winnt_opts) + '", ' if win32_winnt_opts != None else "",
     }
 
     return copts_vars
 
 def configure_windows_toolchain(repository_ctx):
+    # type: (repository_ctx) -> None
     """Configure C++ toolchain on Windows.
 
     Args:
         repository_ctx: The repository context.
     """
-    paths = resolve_labels(repository_ctx, [
-        "@rules_cc//cc/private/toolchain:BUILD.windows.tpl",
-        "@rules_cc//cc/private/toolchain:windows_cc_toolchain_config.bzl",
-        "@rules_cc//cc/private/toolchain:armeabi_cc_toolchain_config.bzl",
-        "@rules_cc//cc/private/toolchain:vc_installation_error.bat.tpl",
-        "@rules_cc//cc/private/toolchain:msys_gcc_installation_error.bat",
-        "@rules_cc//cc/private/toolchain:clang_installation_error.bat.tpl",
-        "@rules_cc//cc/private/toolchain:msvc_deps_scanner_wrapper.bat.tpl",
-    ])
-
-    repository_ctx.symlink(
-        paths["@rules_cc//cc/private/toolchain:windows_cc_toolchain_config.bzl"],
+    copy_file(
+        repository_ctx,
+        Label("@rules_cc//cc/private/toolchain:windows_cc_toolchain_config.bzl"),
         "windows_cc_toolchain_config.bzl",
     )
-    repository_ctx.symlink(
-        paths["@rules_cc//cc/private/toolchain:armeabi_cc_toolchain_config.bzl"],
+    copy_file(
+        repository_ctx,
+        Label("@rules_cc//cc/private/toolchain:armeabi_cc_toolchain_config.bzl"),
         "armeabi_cc_toolchain_config.bzl",
     )
-    repository_ctx.symlink(
-        paths["@rules_cc//cc/private/toolchain:msys_gcc_installation_error.bat"],
+    copy_file(
+        repository_ctx,
+        Label("@rules_cc//cc/private/toolchain:msys_gcc_installation_error.bat"),
         "msys_gcc_installation_error.bat",
     )
 
@@ -954,23 +934,23 @@ def configure_windows_toolchain(repository_ctx):
     # Set outside _get_msvc_vars so the error-stub configs it returns early for
     # are labelled the same as the working ones.
     template_vars["%{compiler}"] = "clang-cl" if _use_clang_cl(repository_ctx) else "msvc-cl"
-    msvc_vars_x64 = _get_msvc_vars(repository_ctx, paths, "x64")
+    msvc_vars_x64 = _get_msvc_vars(repository_ctx, "x64")
     template_vars.update(msvc_vars_x64)
-    template_vars.update(_get_clang_cl_vars(repository_ctx, paths, msvc_vars_x64, "x64"))
+    template_vars.update(_get_clang_cl_vars(repository_ctx, msvc_vars_x64, "x64"))
     template_vars.update(_get_msys_mingw_vars(repository_ctx))
     template_vars.update(_get_copts(repository_ctx))
-    template_vars.update(_get_msvc_vars(repository_ctx, paths, "x86", msvc_vars_x64))
-    template_vars.update(_get_msvc_vars(repository_ctx, paths, "arm", msvc_vars_x64))
-    msvc_vars_arm64 = _get_msvc_vars(repository_ctx, paths, "arm64", msvc_vars_x64)
+    template_vars.update(_get_msvc_vars(repository_ctx, "x86", msvc_vars_x64))
+    template_vars.update(_get_msvc_vars(repository_ctx, "arm", msvc_vars_x64))
+    msvc_vars_arm64 = _get_msvc_vars(repository_ctx, "arm64", msvc_vars_x64)
     template_vars.update(msvc_vars_arm64)
-    template_vars.update(_get_clang_cl_vars(repository_ctx, paths, msvc_vars_arm64, "arm64"))
+    template_vars.update(_get_clang_cl_vars(repository_ctx, msvc_vars_arm64, "arm64"))
 
-    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, "x64"))
-    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, "x86"))
-    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, "arm"))
-    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, paths, template_vars, "arm64"))
+    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, template_vars, "x64"))
+    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, template_vars, "x86"))
+    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, template_vars, "arm"))
+    template_vars.update(_get_msvc_deps_scanner_vars(repository_ctx, template_vars, "arm64"))
     repository_ctx.template(
         "BUILD",
-        paths["@rules_cc//cc/private/toolchain:BUILD.windows.tpl"],
+        Label("@rules_cc//cc/private/toolchain:BUILD.windows.tpl"),
         template_vars,
     )
