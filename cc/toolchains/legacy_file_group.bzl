@@ -16,6 +16,18 @@
 # Taken from https://bazel.build/docs/cc-toolchain-config-reference#actions
 # TODO: This is best-effort. Update this with the correct file groups once we
 #  work out what actions correspond to what file groups.
+# TODO(https://github.com/bazelbuild/bazel/issues/31770): Use native key types
+# once all supported Bazel versions can express them.
+# type: dict[{
+#     "ar_files": list[Label],
+#     "as_files": list[Label],
+#     "compiler_files": list[Label],
+#     "coverage_files": list[Label],
+#     "dwp_files": list[Label],
+#     "linker_files": list[Label],
+#     "objcopy_files": list[Label],
+#     "strip_files": list[Label],
+# }]
 LEGACY_FILE_GROUPS = {
     "ar_files": [
         Label("//cc/toolchains/actions:ar_actions"),
@@ -32,8 +44,11 @@ LEGACY_FILE_GROUPS = {
         Label("//cc/toolchains/actions:cpp20_module_codegen"),
         Label("//cc/toolchains/actions:cpp_module_deps_scanning"),
     ],
-    # There are no actions listed for coverage and objcopy in action_names.bzl.
-    "coverage_files": [],
+    "coverage_files": [
+        Label("//cc/toolchains/actions:gcov"),
+        Label("//cc/toolchains/actions:llvm_cov"),
+        Label("//cc/toolchains/actions:llvm_profdata"),
+    ],
     "dwp_files": [
         Label("//cc/toolchains/actions:dwp"),
     ],

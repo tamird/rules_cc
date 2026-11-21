@@ -12,10 +12,12 @@ load(":cc_link_action_test.bzl", "cc_link_action_tests")
 load(":cc_linkstamp_compile_test.bzl", "cc_linkstamp_compile_tests")
 load(":cc_objc_library_configured_target_tests.bzl", "cc_objc_library_configured_target_tests")
 load(":cc_output_groups_test.bzl", "cc_output_groups_tests")
+load(":cc_toolchain_include_directories_test.bzl", "cc_toolchain_include_directories_tests")
 load(":compile_build_variables_tests.bzl", "compile_build_variables_tests")
 load(":cpp_modules_test.bzl", "cpp_modules_tests")
 load(":debug_info_packaging_test.bzl", "debug_info_packaging_tests")
 load(":disallowed_copts_test.bzl", "disallowed_copts_tests")
+load(":find_cc_toolchain_test.bzl", "find_cc_toolchain_missing_provider_test")
 load(":link_build_variables_test.bzl", "link_build_variables_tests")
 
 cc_binary_configured_target_tests(name = "cc_binary_configured_target_tests")
@@ -38,6 +40,8 @@ debug_info_packaging_tests(name = "debug_info_packaging_tests")
 
 disallowed_copts_tests(name = "disallowed_copts_tests")
 
+find_cc_toolchain_missing_provider_test(name = "find_cc_toolchain_missing_provider_test")
+
 cc_fdo_env_tests(name = "cc_fdo_env_tests")
 
 link_build_variables_tests(name = "link_build_variables_tests")
@@ -55,3 +59,5 @@ cc_link_action_tests(name = "cc_link_action_tests")
 cc_linkstamp_compile_tests(name = "cc_linkstamp_compile_tests")
 
 cc_binary_fdo_tests(name = "cc_binary_fdo_tests")
+
+cc_toolchain_include_directories_tests(name = "cc_toolchain_include_directories_tests")

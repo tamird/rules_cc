@@ -324,6 +324,10 @@ def _cc_lib_impl(ctx):
         language = "c++",
         compilation_outputs = compilation_outputs,
         linking_contexts = linking_contexts,
+        disallow_dynamic_library = not cc_common.is_enabled(
+            feature_configuration = feature_configuration,
+            feature_name = "supports_dynamic_linker",
+        ),
     )
     library = linking_outputs.library_to_link
     files = []
@@ -789,13 +793,6 @@ EOF
 function test_aspect_accessing_args_link_action_with_tree_artifact() {
   is_bazel || return 0
 
-  # This test assumes the presence of "nodeps" dynamic libraries, which do not
-  # function on Apple platforms.
-  if is_darwin; then
-    return 0
-  fi
-
-  
   local package="${FUNCNAME[0]}"
   mkdir -p "${package}"
   cat > "${package}/makes_tree_artifacts.sh" <<EOF
@@ -910,18 +907,14 @@ EOF
       grep "\(gcc\|clang\|clanc-cl.exe\|cl.exe\|cc_wrapper.sh\)" \
       || fail "args didn't contain the tool path"
 
-  cat "bazel-bin/${package}/aspect_out" | grep "a.*o .*b.*o .*c.*o" \
-      || fail "args didn't contain tree artifact paths"
+  grep -F "${package}/x.cc" "bazel-bin/${package}/aspect_out" \
+      || fail "args didn't contain the source path"
+
+  grep "${package}/_objs/x/x.*\\.o" "bazel-bin/${package}/aspect_out" \
+      || fail "args didn't contain the object file path"
 }
 
 function test_directory_arg_compile_action() {
-  # This test assumes the presence of "nodeps" dynamic libraries, which do not
-  # function on Apple platforms.
-  if is_darwin; then
-    return 0
-  fi
-
-  
   local package="${FUNCNAME[0]}"
   mkdir -p "${package}"
 
@@ -961,8 +954,11 @@ EOF
       grep "\(gcc\|clang\|clanc-cl.exe\|cl.exe\)" \
       || fail "args didn't contain the tool path"
 
-  cat "bazel-bin/${package}/aspect_out" | grep "a.*o .*b.*o .*c.*o" \
-      || fail "args didn't contain tree artifact paths"
+  grep -F "${package}/x.cc" "bazel-bin/${package}/aspect_out" \
+      || fail "args didn't contain the source path"
+
+  grep "${package}/_objs/x/x.*\\.o" "bazel-bin/${package}/aspect_out" \
+      || fail "args didn't contain the object file path"
 }
 
 function test_reconstructing_cpp_actions() {
@@ -1480,7 +1476,7 @@ EOF
 
 function test_env_inherit_cc_test() {
   
-  mkdir pkg
+  mkdir -p pkg
   cat > pkg/BUILD <<EOF
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 cc_test(
@@ -1508,7 +1504,7 @@ EOF
 
 function test_env_attr_cc_binary() {
   
-  mkdir pkg
+  mkdir -p pkg
   cat > pkg/BUILD <<EOF
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 cc_binary(
@@ -1805,7 +1801,6 @@ EOF
 
 function test_bazel_cxxopts() {
  is_bazel || return 0
- is_darwin && return 0
 
   cat > BUILD <<'EOF'
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
@@ -1831,19 +1826,15 @@ int main() {
 }
 EOF
 
-  export BAZEL_USE_CPP_ONLY_TOOLCHAIN=1
   export BAZEL_CXXOPTS=-DEXIT_CODE=0
   bazel build //:main_c \
-    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
     --repo_env=BAZEL_CXXOPTS=-DEXIT_CODE=0 && fail "Expected C compilation to fail"
   bazel run //:main_cpp \
-    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
     --repo_env=BAZEL_CXXOPTS=-DEXIT_CODE=0 || fail "Expected C++ compilation to pass"
 }
 
 function test_bazel_conlyopts() {
  is_bazel || return 0
- is_darwin && return 0
   
   cat > BUILD <<'EOF'
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
@@ -1869,13 +1860,10 @@ int main() {
 }
 EOF
 
-  export BAZEL_USE_CPP_ONLY_TOOLCHAIN=1
   export BAZEL_CONLYOPTS=-DEXIT_CODE=0
   bazel build //:main_cpp \
-    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
     --repo_env=BAZEL_CONLYOPTS=-DEXIT_CODE=0 && fail "Expected C++ compilation to fail"
   bazel run //:main_c \
-    --repo_env=BAZEL_USE_CPP_ONLY_TOOLCHAIN=1 \
     --repo_env=BAZEL_CONLYOPTS=-DEXIT_CODE=0 || fail "Expected C compilation to pass"
 }
 
@@ -1954,7 +1942,7 @@ function test_cc_toolchain_asan_feature() {
   __is_installed "lib$feature" || return 0
 
   
-  mkdir pkg
+  mkdir -p pkg
   cat > pkg/BUILD <<EOF
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 cc_binary(
@@ -1991,7 +1979,7 @@ function test_cc_toolchain_tsan_feature() {
   __is_installed "lib$feature" || return 0
 
   
-  mkdir pkg
+  mkdir -p pkg
   cat > pkg/BUILD <<EOF
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 cc_binary(
@@ -2173,8 +2161,7 @@ EOF
 }
 
 function test_parse_headers_clean() {
-  
-  mkdir pkg
+  mkdir -p pkg
   cat > pkg/BUILD <<'EOF'
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 package(features = ["parse_headers"])
@@ -2469,6 +2456,140 @@ EOF
   export CC=clang
   bazel build --repo_env=CC=clang --features=thin_lto @repo//foo \
     > "$TEST_log" || fail "expected build success"
+}
+
+function test_command_line_splitting_dynamic_library_with_ifso() {
+  local pkg="bazel_internal/test_rules/cc/dynamic_ifso_param_file"
+  rm -rf "$pkg"
+  mkdir -p "$pkg"
+
+  cat > "$pkg/cc_toolchain_config.bzl" <<'EOF'
+load("@rules_cc//cc:cc_toolchain_config_lib.bzl", "feature")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/toolchains:cc_toolchain_config_info.bzl", "CcToolchainConfigInfo")
+
+def _impl(ctx):
+    return cc_common.create_cc_toolchain_config_info(
+        ctx = ctx,
+        toolchain_identifier = "test-unix-ifso-toolchain",
+        host_system_name = "local",
+        target_system_name = "local",
+        target_cpu = "k8",
+        target_libc = "unknown",
+        compiler = "compiler",
+        abi_version = "unknown",
+        abi_libc_version = "unknown",
+        features = [
+            feature(name = "supports_dynamic_linker", enabled = True),
+            feature(name = "supports_interface_shared_libraries", enabled = True),
+        ],
+    )
+
+cc_toolchain_config = rule(
+    implementation = _impl,
+    provides = [CcToolchainConfigInfo],
+    fragments = ["cpp"],
+)
+EOF
+
+  cat > "$pkg/link_rule.bzl" <<'EOF'
+load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+
+def _link_rule_impl(ctx):
+    cc_toolchain = find_cc_toolchain(ctx)
+    feature_configuration = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = cc_toolchain,
+    )
+    cc_common.link(
+        actions = ctx.actions,
+        feature_configuration = feature_configuration,
+        cc_toolchain = cc_toolchain,
+        name = ctx.label.name,
+        output_type = "dynamic_library",
+        emit_interface_shared_library = True,
+    )
+    return []
+
+cc_link_rule = rule(
+    implementation = _link_rule_impl,
+    fragments = ["cpp"],
+    toolchains = use_cc_toolchain(),
+)
+
+def _link_args_aspect_impl(target, ctx):
+    link_actions = [a for a in target.actions if a.mnemonic == "CppLink"]
+    if len(link_actions) != 1:
+        fail("Expected 1 CppLink action, got %d" % len(link_actions))
+    link_action = link_actions[0]
+    output_paths = [f.short_path for f in link_action.outputs.to_list()]
+    if not any([p.endswith(".ifso") for p in output_paths]):
+        fail("Expected an .ifso output in CppLink outputs, got: %s" % output_paths)
+    out = ctx.actions.declare_file(ctx.label.name + "_link_args.txt")
+    ctx.actions.run_shell(
+        outputs = [out],
+        command = 'printf "%s\\n" "$@" > ' + out.path,
+        arguments = [link_action.args[1]],
+    )
+    return [OutputGroupInfo(link_args = depset([out]))]
+
+link_args_aspect = aspect(implementation = _link_args_aspect_impl)
+EOF
+
+  touch "$pkg/foo.cc"
+
+  cat > "$pkg/BUILD" <<'EOF'
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain")
+load(":cc_toolchain_config.bzl", "cc_toolchain_config")
+load(":link_rule.bzl", "cc_link_rule")
+
+filegroup(name = "empty")
+
+cc_toolchain_config(name = "config")
+
+cc_toolchain(
+    name = "cc_toolchain",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_param_files = True,
+    toolchain_config = ":config",
+)
+
+toolchain(
+    name = "toolchain",
+    toolchain = ":cc_toolchain",
+    toolchain_type = "@rules_cc//cc:toolchain_type",
+)
+
+cc_link_rule(name = "dynamic_lib")
+
+cc_library(
+    name = "nodeps_lib",
+    srcs = ["foo.cc"],
+)
+EOF
+
+  bazel build \
+    --extra_toolchains="//$pkg:toolchain" \
+    --aspects="//$pkg:link_rule.bzl%link_args_aspect" \
+    --output_groups=link_args \
+    "//$pkg:dynamic_lib" \
+    "//$pkg:nodeps_lib" \
+    >& "$TEST_log" || fail "Expected build to succeed"
+
+  grep -qE '^@.*\.params$' "bazel-bin/$pkg/dynamic_lib_link_args.txt" \
+    || fail "Expected dynamic library with .ifso to use a parameter file, got: $(cat "bazel-bin/$pkg/dynamic_lib_link_args.txt")"
+  if grep -q '\.params$' "bazel-bin/$pkg/nodeps_lib_link_args.txt"; then
+    fail "Expected nodeps dynamic library with .ifso not to use a parameter file, got: $(cat "bazel-bin/$pkg/nodeps_lib_link_args.txt")"
+  fi
 }
 
 run_suite "cc_integration_test"

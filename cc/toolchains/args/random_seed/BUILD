@@ -11,8 +11,17 @@ cc_feature(
 
 cc_args(
     name = "random_seed",
-    actions = ["//cc/toolchains/actions:compile_actions"],
+    actions = [
+        "//cc/toolchains/actions:compile_actions",
+        "//cc/toolchains/actions:cpp20_module_actions",
+    ],
     args = ["-frandom-seed={output_file}"],
     format = {"output_file": "//cc/toolchains/variables:output_file"},
     requires_not_none = "//cc/toolchains/variables:output_file",
+)
+
+filegroup(
+    name = "srcs",
+    srcs = ["BUILD"],
+    visibility = ["//cc/toolchains/args:__pkg__"],
 )

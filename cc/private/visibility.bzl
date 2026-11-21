@@ -3,6 +3,8 @@
 # buildifier: disable=bzl-visibility
 load("//cc/private:cc_internal.bzl", _cc_internal = "cc_internal")
 
+visibility("//cc/...")
+
 def check_private_api():
     _cc_internal.check_private_api(allowlist = PRIVATE_STARLARKIFICATION_ALLOWLIST, depth = 2)
 
@@ -21,7 +23,9 @@ def wrap_with_check_private_api(symbol):
 
     return callback
 
-INTERNAL_VISIBILITY = ["public"]
+# Things that are publicly visible in the open-source Bazel world, but have
+# restricted visibility within Google's monorepo.
+PUBLIC_IF_NOT_GOOGLE = ["public"]
 
 PRIVATE_RULES_VISIBILITY_FOR_BZL = []
 
@@ -64,6 +68,9 @@ PRIVATE_STARLARKIFICATION_ALLOWLIST = [
     ("", "third_party/bazel_rules/rules_rust/rust/private"),
     ("rules_rust", "rust/private"),
     ("rules_rs", "rust/private"),
+    # Swift rules
+    ("rules_swift", "swift/internal"),
+    ("build_bazel_rules_swift", "swift/internal"),
     # Python rules
     ("", "third_party/bazel_rules/rules_python"),
     # Various
